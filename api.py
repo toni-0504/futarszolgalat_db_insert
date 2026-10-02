@@ -11,19 +11,34 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 # A saját függvényeink – egy sor sem változik bennük
-from futarszolgalat_db_insert.sokadik_verzio import (
-    felhasznalo_letrehoz,
-    felhasznalo_lekerdez,
-    futar_lekerdez,
-    futar_allapot_modosit,
-    elerheto_futarok,
-    termek_lekerdez,
-    rendeles_letrehoz,
-    rendeles_lekerdez,
-    rendeles_statusz_modosit,
-    felhasznalo_rendelesei,
-    futar_rendelesei,
-)
+if __package__:
+    from .sokadik_verzio import (
+        felhasznalo_letrehoz,
+        felhasznalo_lekerdez,
+        futar_lekerdez,
+        futar_allapot_modosit,
+        elerheto_futarok,
+        termek_lekerdez,
+        rendeles_letrehoz,
+        rendeles_lekerdez,
+        rendeles_statusz_modosit,
+        felhasznalo_rendelesei,
+        futar_rendelesei,
+    )
+else:
+    from sokadik_verzio import (
+        felhasznalo_letrehoz,
+        felhasznalo_lekerdez,
+        futar_lekerdez,
+        futar_allapot_modosit,
+        elerheto_futarok,
+        termek_lekerdez,
+        rendeles_letrehoz,
+        rendeles_lekerdez,
+        rendeles_statusz_modosit,
+        felhasznalo_rendelesei,
+        futar_rendelesei,
+    )
 
 # Ez maga az alkalmazás – minden végpont ehhez fog tartozni
 app = FastAPI(title="Futárszolgálat API")

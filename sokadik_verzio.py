@@ -1,6 +1,10 @@
 import sqlite3
 from pathlib import Path
-from futarszolgalat_db_insert.db import kapcsolat
+
+if __package__:
+    from .db import kapcsolat
+else:
+    from db import kapcsolat
 
 DB_PATH = Path(__file__).resolve().parent / "futarszolgalat.db"
 
