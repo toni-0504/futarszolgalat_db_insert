@@ -68,21 +68,22 @@ class Felhasznalo:
     nev: str
     cim: str
     telszam: str
-    email: str
-    jelszo_hash: str = field(repr=False)   # az SQL-ben a 'password' oszlopba kerül
+    email: str | None = None
+    jelszo_hash: str | None = field(default=None, repr=False)   # az SQL-ben a 'password' oszlopba kerül
     admin: bool = False                    # az SQL-ben: isAdmin
     id: int | None = None
 
     def __post_init__(self):
         for mezo in ("nev", "cim", "telszam"):
             _ellenoriz(bool(getattr(self, mezo).strip()), f"A(z) {mezo} nem lehet üres.")
-        _ellenoriz(isinstance(self.email, str) and isinstance(self.jelszo_hash, str),
-                   "Hiányzik az email vagy a jelszo_hash (a régi sorokat ki kell tölteni).")
-        self.email = self.email.strip().lower()   # egységes alak: kis- és nagybetű ne számítson
-        _ellenoriz(bool(_EMAIL_MINTA.match(self.email)), f"Érvénytelen email: {self.email}")
-        _ellenoriz(self.jelszo_hash.startswith("pbkdf2_sha256$"),
-                   "A jelszó nincs hash-elve. Új felhasználónál a regisztral() metódust használd, "
-                   "régi (sima szöveges) jelszavaknál futtasd a migracio_felhasznalo()-t.")
+        _ellenoriz((self.email is None) == (self.jelszo_hash is None),
+                   "Az email és a jelszóhash együtt adható meg.")
+        if self.email is not None and self.jelszo_hash is not None:
+            self.email = self.email.strip().lower()   # egységes alak: kis- és nagybetű ne számítson
+            _ellenoriz(bool(_EMAIL_MINTA.match(self.email)), f"Érvénytelen email: {self.email}")
+            _ellenoriz(self.jelszo_hash.startswith("pbkdf2_sha256$"),
+                       "A jelszó nincs hash-elve. Új felhasználónál a regisztral() metódust használd, "
+                       "régi (sima szöveges) jelszavaknál futtasd a migracio_felhasznalo()-t.")
 
     @classmethod
     def regisztral(cls, nev: str, cim: str, telszam: str, email: str,
@@ -93,7 +94,7 @@ class Felhasznalo:
         return cls(nev, cim, telszam, email, jelszo_hashel(jelszo), admin)
 
     def jelszo_helyes(self, jelszo: str) -> bool:
-        return jelszo_egyezik(jelszo, self.jelszo_hash)
+        return bool(self.jelszo_hash and jelszo_egyezik(jelszo, self.jelszo_hash))
 
     def jelszo_csere(self, uj_jelszo: str) -> None:
         _ellenoriz(len(uj_jelszo) >= MIN_JELSZO_HOSSZ,

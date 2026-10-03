@@ -7,11 +7,34 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from futarszolgalat_db_insert.modellek import (Allergen, Felhasznalo, Futar, FutarPozicio, Rendeles,
-                      RendelesTetel, Termek, jelszo_hashel)
+try:
+    from .modellek import (Allergen, Felhasznalo, Futar, FutarPozicio, Rendeles,
+                           RendelesTetel, Termek, jelszo_hashel)
+except ImportError:
+    from modellek import (Allergen, Felhasznalo, Futar, FutarPozicio, Rendeles,
+                          RendelesTetel, Termek, jelszo_hashel)
 
 # A script mappájából számoljuk, így mindegy, honnan indítod a programot.
 DB_PATH = Path(__file__).resolve().parent / "futarszolgalat.db"
+SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
+
+
+def _schema_biztosit(conn: sqlite3.Connection) -> None:
+    """Új adatbázisnál létrehozza a táblákat, réginél kiegészíti a felhasználót."""
+    van_tabla = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1"
+    ).fetchone()
+    if van_tabla is None:
+        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    oszlopok = {sor["name"] for sor in conn.execute("PRAGMA table_info(felhasznalo)")}
+    for nev, definicio in (
+        ("email", "TEXT"),
+        ("password", "TEXT"),
+        ("isAdmin", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if nev not in oszlopok:
+            conn.execute(f"ALTER TABLE felhasznalo ADD COLUMN {nev} {definicio}")
 
 
 # ---------------------------------------------------------------------------
@@ -24,6 +47,7 @@ def kapcsolat():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")  # SQLite-ban alapból ki van kapcsolva
     try:
+        _schema_biztosit(conn)
         yield conn
         conn.commit()
     except Exception:
