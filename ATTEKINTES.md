@@ -208,35 +208,91 @@ Found` válasz normális.
 
 ## Indítás, tesztek és telepítés
 
-Python 3.10 vagy újabb szükséges. Windows PowerShellben virtuális környezetből
-például így indítható:
+Python 3.10 vagy újabb szükséges. A virtuális környezet és a csomagok (csak első
+alkalommal):
+
+macOS / Linux:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+```
+
+Windows (PowerShell):
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements-dev.txt
-uvicorn api:app --reload
+.venv\Scripts\pip install -r requirements-dev.txt
 ```
 
-macOS-en és Linuxon ugyanez: `python3 -m venv .venv`, `source .venv/bin/activate`.
-Ezután az API a `http://127.0.0.1:8000` címen érhető el, a dokumentáció a
+### Önálló indítás
+
+A repóban lévő `futarszolgalat.db`-vel:
+
+```bash
+.venv/bin/uvicorn api:app --reload          # macOS / Linux
+.venv\Scripts\uvicorn api:app --reload      # Windows
+```
+
+Az API a `http://127.0.0.1:8000` címen érhető el, a dokumentáció a
 `http://127.0.0.1:8000/docs` címen.
 
-Tesztek futtatása (az adatbázis másolatán, a repó fájlja nem változik):
+### Helyi bemutató a Laravel backenddel
 
-```powershell
-python -m pytest
+A projektet helyben mutatjuk be: a Python API és a Laravel backend
+([DavidVigh/futarszolgalat-business](https://github.com/DavidVigh/futarszolgalat-business))
+ugyanazon a gépen fut, **egy közös adatbázisfájllal**, a Laravel
+`database/database.sqlite` fájljával. A két repó egymás mellé van klónozva:
+
+```
+valahol/
+├── futarszolgalat-business/      ← Laravel (futarszolgalat/ mappa)
+└── futarszolgalat_db_insert/     ← ez a repó
 ```
 
-A Render konfiguráció ugyanezt az `api:app` ASGI-alkalmazást indítja, a
-szolgáltatás által megadott porton.
+1. Készítsd elő a Laravelt a repójának `README.md`-je szerint (ez másolja a végleges
+   adatbázist a `database/database.sqlite` helyre).
+2. Indítsd el ezt az API-t úgy, hogy a `FUTARSZOLGALAT_DB` a Laravel adatbázisára
+   mutasson:
+
+   macOS / Linux:
+
+   ```bash
+   FUTARSZOLGALAT_DB="$PWD/../futarszolgalat-business/futarszolgalat/database/database.sqlite" .venv/bin/uvicorn api:app --port 8000
+   ```
+
+   Windows (PowerShell):
+
+   ```powershell
+   $env:FUTARSZOLGALAT_DB = "$PWD\..\futarszolgalat-business\futarszolgalat\database\database.sqlite"
+   .venv\Scripts\uvicorn api:app --port 8000
+   ```
+
+3. Indítsd el a Laravelt egy másik terminálban: `php artisan serve --port=8001`. A
+   Laravel a `http://127.0.0.1:8000` címen éri el ezt az API-t (a `.env`
+   `PYTHON_API_URL` értéke), például a futárpozícióért.
+
+Az API-token helyben nem kötelező; ha használjátok, ugyanaz az érték kell itt
+`API_TOKEN`, a Laravelnél `PYTHON_API_TOKEN` néven.
+
+### Tesztek
+
+Az adatbázis másolatán futnak, a repó fájlja nem változik:
+
+```bash
+.venv/bin/python -m pytest        # macOS / Linux
+.venv\Scripts\python -m pytest    # Windows
+```
+
+### Render
+
+A `render.yaml` a Render ingyenes csomagjára telepít. A bemutató helyben megy, ezért
+tartós tárhely nincs beállítva: a Renderen az API-n át beírt adatok minden
+újraindításkor és telepítéskor elvesznek, és a repóban lévő `futarszolgalat.db` áll
+vissza.
 
 ## Fontos határok és megjegyzések
 
-- A Render ingyenes csomagjában a fájlrendszer nem tartós: újraindításkor vagy új
-  telepítéskor az API-n keresztül beírt adatok elvesznek, és a repóban lévő
-  `futarszolgalat.db` áll vissza. Tartós működéshez tartós tárhely kell (a
-  `FUTARSZOLGALAT_DB` változóval oda lehet irányítani az adatbázist).
 - Az API maga nem kezel munkamenetet és szerepköröket: hogy ki adminisztrátor, és
   hogy a kérésben szereplő `felhasznalo_id`/`futar_id` tényleg a bejelentkezett
   felhasználóé-e, azt a hívó (Laravel) ellenőrzi. Ezért kell élesben az
