@@ -2,264 +2,248 @@
 
 ## A projekt célja
 
-A repó egy Python-alapú futárszolgálati mintaprojekt. A SQLite-adatbázisban
-felhasználókat, futárokat, futárpozíciókat, termékeket és rendeléseket kezel.
-Az üzleti objektumokat a modellréteg írja le, az adatbázis-műveleteket az
-adatkezelő modul végzi, a HTTP-s felületet pedig egy FastAPI-alkalmazás adja.
+A repó a futárszolgálat Python-alapú REST API-ja. A SQLite-adatbázisban
+felhasználókat, futárokat, futárpozíciókat, termékeket, allergéneket és
+rendeléseket kezel, és az üzleti folyamatokat (rendelésleadás, futárfelvétel,
+kiszállítás, értékelés, jatt) is ez a réteg tartja be. Az üzleti objektumokat a
+modellréteg írja le, az adatbázis-műveleteket az adatkezelő modul végzi, a
+HTTP-s felületet pedig egy FastAPI-alkalmazás adja. A Laravel backend ezt az
+API-t hívja HTTP-n.
 
 ## Fájlszerkezet
 
 | Fájl | Szerep |
 | --- | --- |
 | `modellek.py` | Az üzleti objektumok, adatellenőrzések és néhány üzleti szabály. |
-| `adatbazis.py` | Kapcsolódás a meglévő SQLite-adatbázishoz, valamint a modellek mentése, betöltése, módosítása, törlése és szűrése. Nem hoz létre vagy migrál sémát. |
-| `api.py` | FastAPI-alkalmazás, kérésmodellek és HTTP-végpontok. |
-| `requirements.txt` | A futtatáshoz szükséges Python-csomagok verziótartományai: FastAPI és Uvicorn. |
+| `adatbazis.py` | Kapcsolódás a meglévő SQLite-adatbázishoz, a modellek mentése, betöltése, módosítása, inaktiválása és szűrése, valamint a rendelési folyamat lépései. Nem hoz létre és nem migrál sémát. |
+| `api.py` | FastAPI-alkalmazás, kérésmodellek, hibakezelés, opcionális API-token és a HTTP-végpontok. |
+| `tests/` | pytest-tesztek a teljes API-ra; minden teszt az adatbázis ideiglenes másolatán fut. |
+| `requirements.txt` | A futtatáshoz szükséges csomagok: FastAPI, Uvicorn, bcrypt. |
+| `requirements-dev.txt` | A tesztekhez szükséges további csomagok: pytest, httpx. |
+| `pytest.ini` | A pytest beállításai. |
 | `render.yaml` | Render webszolgáltatás-konfiguráció; telepítéskor függőségeket telepít, majd Uvicornnal indítja az API-t. |
-| `.gitignore` | Kizárja a Python gyorsítótárát, a virtuális környezetet és a `.env` fájlokat. |
-| `futarszolgalat.db` | Az `etelrendelesvegleges.db.sql` dumpból betöltött SQLite-adatbázis, a dump adataival, nézeteivel és indexeivel. |
+| `futarszolgalat.db` | A csapat végleges, javított adatbázisa (`futarszolgalat_javitott.db`), adatokkal, nézetekkel, indexekkel és triggerekkel. |
 | `ATTEKINTES.md` | Ez a dokumentum. |
+
+## Az adatbázis
+
+A `futarszolgalat.db` a DB-s csapat végleges exportjából (`futarszolgalat.db.sql`,
+2026-10-15) készült a `futarszolgalat_javitas.sql` javító szkripttel. Ugyanez az
+adatbázis van a Laravel-repóban is (`futarszolgalat/database/export/`), így a két
+alkalmazás ugyanarra a sémára épül. A javítások röviden:
+
+- a jelszavak bcrypt hashként tárolódnak (`$2y$` előtaggal, ezt a PHP/Laravel is
+  ellenőrizni tudja);
+- nincs drónos kiszállítás: a `futar.jarmu` csak `auto`, `bicikli` vagy `motor`
+  lehet, az `ember` oszlop megszűnt;
+- az új és lemondott rendeléseknek nincs futárja, egy futárnak legfeljebb egy
+  aktív rendelése van, a futár állapota követi a rendeléseit;
+- az időpontok (`letrehozva`, `kiszallitva_ido`, `frissitve`) ki vannak töltve, a
+  futárpozíciók koordinátái fokban vannak (pl. 47.4979).
+
+Fő táblák és kapcsolatok:
+
+- `felhasznalo`: név, cím, telefonszám, egyedi e-mail, jelszóhash, `isAdmin`,
+  `aktiv`;
+- `futar`: név, egyedi telefonszám, jármű, állapot (`elerheto`, `uton`, `szunet`),
+  hatósugár, `aktiv`;
+- `futar_pozicio`: futáronként egy sor (`futarID` egyedi) a legutolsó pozícióval
+  és a frissítés idejével;
+- `fogas`: a fogások törzsadata (`kod`, `tipus`); a termék `(fogas, tipus)` párjának
+  itt léteznie kell;
+- `termek`: étel vagy ital, ár, elkészítési idő, prioritás, `aktiv`,
+  `allergen_ellenorizve`;
+- `allergen` és `termek_allergen`: allergének és a termékekhez kötésük;
+- `rendeles`: megrendelő, futár (új rendelésnél még nincs), cím, km, fizetés,
+  számlakérés, szállítási díj, státusz, értékelés, jatt, létrehozás és kiszállítás
+  ideje;
+- `rendeles_tetel`: rendelés–termék–darabszám, a rendeléskori egységárral;
+- `szamlazasi_adat`: a számlát kérő rendelések számlázási neve, címe, adószáma.
+
+Az adatbázis maga is sokat ellenőriz: CHECK-ek (pl. jatt csak kiszállított, kártyás
+rendelésen; futár kell minden `kosar`/`új`/`lemondva` utáni státuszban), triggerek
+(a futár aktív-e, belefér-e a hatósugárba; az egységár és a kiszállítás ideje
+automatikusan kitöltődik) és `ON DELETE RESTRICT` kulcsok. Emiatt felhasználót,
+futárt nem törlünk, hanem inaktiválunk (`aktiv = 0`), és rendelésben már szerepelt
+terméket sem lehet törölni, csak inaktiválni.
 
 ## Működési rétegek
 
 ### Modellek – `modellek.py`
 
-Az `Allergen`, `Felhasznalo`, `Futar`, `FutarPozicio`, `Termek`,
-`RendelesTetel` és `Rendeles` adat-osztályok az alkalmazás fogalmait képviselik.
-Az objektumok konstruktorai többek között ellenőrzik a jármű- és rendelési
-állapotokat, a fizetési módot, a hatótávot, az árat, a borravaló feltételeit
-és a rendelt mennyiséget.
+Az `Allergen`, `Fogas`, `Felhasznalo`, `Futar`, `FutarPozicio`, `Termek`,
+`RendelesTetel`, `SzamlazasiAdat` és `Rendeles` adat-osztályok az alkalmazás
+fogalmait képviselik. A konstruktorok ugyanazokat a szabályokat ellenőrzik, mint
+az adatbázis CHECK-jei, plusz az üzleti szabályokat (pl. telefonszám `+36` vagy
+`06` kezdettel, ételnél kötelező elkészítési idő, adószám formátuma).
 
-A `Felhasznalo.regisztral()` legalább 8 karakteres jelszót fogad el, és a
-dumpnak megfelelően közvetlenül a `password` oszlopba írja; a bejelentkezés
-közvetlen szöveges összehasonlítást használ. Ez a tárolási mód nem biztonságos,
-jelszót valós felhasználói fiókokhoz vagy éles rendszerben nem szabad így
-tárolni. A modellréteg nem végez adatbázisba írást. Az objektumok a `sorbol()`
-metódusokkal alakíthatók SQLite-sorokból modellpéldánnyá.
+A `Felhasznalo.regisztral()` legalább 8 karakteres jelszót fogad el, és csak a
+bcrypt hasht tárolja; a bejelentkezés `bcrypt.checkpw`-vel ellenőriz. A rendelés
+a tételek rendeléskori egységárából számolja a termékösszeget, a végösszegbe a
+szállítási díj és a jatt is beleszámít (mint a `v_rendeles_osszeg` nézetben).
 
-A rendelés tételeket fogad, kiszámítja azok összegét, és összegyűjti a
-termékeihez tartozó allergéneket.
+### Adatbázis – `adatbazis.py`
 
-### Adatbázis – `adatbazis.py` és `futarszolgalat.db`
+Az adatbázis alapból az `adatbazis.py` melletti `futarszolgalat.db`; a
+`FUTARSZOLGALAT_DB` környezeti változóval más fájl adható meg (a tesztek így
+dolgoznak másolaton). A `kapcsolat()` csak már létező adatbázist nyit meg,
+bekapcsolja az idegen kulcsok ellenőrzését, sikeres művelet után commitol, hiba
+esetén rollbackel. Sémát nem hoz létre és nem módosít.
 
-Az adatbázis helye az `adatbazis.py` fájl könyvtára melletti
-`futarszolgalat.db`; nem a munkakönyvtártól függ. A `kapcsolat()` csak már
-létező adatbázist nyit meg, bekapcsolja az idegen kulcsok ellenőrzését,
-sikeres művelet után commitol, hiba esetén rollbackel, majd lezárja a
-kapcsolatot. Nem készít új adatbázist, nem futtat DDL-t, és nem változtatja meg
-a táblák, oszlopok, kulcsok, nézetek vagy indexek szerkezetét. A futtatáshoz a
-megadott adatbázisfájlnak és a várt tábláknak már létezniük kell.
+A több lépésből álló műveletek egy tranzakcióban futnak, az állapotváltások
+feltételes `UPDATE`-tel (`WHERE ... AND statusz = ...`). Így például ha két futár
+egyszerre próbálja felvenni ugyanazt a rendelést, csak az egyiknek sikerül, a
+másik `409`-et kap.
 
-Az adatbázis-kezelő függvények a következő területeket fedik le:
+A hibákat három kivételtípus jelzi: `NemTalalhato` (404), `JogosultsagHiba` (403,
+pl. nem a saját rendelés) és `UzletiHiba` (409, pl. rossz státuszban lévő
+rendelés); a modellek érvénytelen adatra `ValidacioHiba`-t (400) dobnak.
 
-- felhasználó létrehozása, lekérdezése, módosítása, törlése és bejelentkeztetése;
-- futár létrehozása, lekérdezése és állapotának módosítása, valamint az
-  elérhető futárok szűrése;
-- futárpozíciók rögzítése és lekérdezése;
-- termékek és allergénkapcsolataik mentése, illetve lekérdezése;
-- rendelések és rendelési tételek tranzakciós mentése, betöltése és
-  státuszmódosítása;
-- felhasználók, futárok, termékek és rendelések több szempont szerinti
-  szűrése, rendezése és lapozása.
+### Rendelési folyamat
 
-A dinamikus szűrésnél az értékek paraméterezett SQL-paraméterként kerülnek a
-lekérdezésbe; a rendezhető oszlopokat engedélyezett listák korlátozzák.
+```
+új --(futár felveszi)--> elfogadva --(konyha)--> készül --(futár átveszi)--> úton --(futár átadja)--> kiszállítva
+ \--(megrendelő lemondja)--> lemondva          (elfogadva -> úton is lehet, ha a konyha lépése kimarad)
+```
 
-Az adatbázis dumpjának fő táblái és kapcsolatai:
-
-- `felhasznalo`: felhasználói adatok, kötelező e-mail és szöveges jelszó, valamint
-  adminisztrátori jelző;
-- `futar`: futár adatai, járműve, az `ember` mező, állapota és hatósugara;
-- `futar_pozicio`: futárhoz tartozó GPS-koordináták és címek;
-- `termek`: étel vagy ital neve, fogása, leírása, ára és elkészítési ideje;
-- `allergen`: allergénkód és név;
-- `termek_allergen`: termék és allergén közötti kapcsolótábla;
-- `rendeles`: felhasználóhoz és futárhoz rendelt rendelés adatai;
-- `rendeles_tetel`: rendelés és termék közötti kapcsolat, darabszámmal.
-
-Az adatbázis saját idegen kulcsokat és megszorításokat alkalmaz; például a
-jármű, fizetési mód és prioritás értékeit korlátozza. Az alkalmazás új
-futároknál csak autót, biciklit és motort fogad el; az API sem az `ember`
-mezőt, sem más járműtípust nem tesz elérhetővé. A rendelésmentés is csak
-támogatott járműhöz enged rendelést társítani. Az `ember` mező az adatbázis
-belső kezelése miatt változatlan marad. A futárpozíció idegen
-kulcsánál a dump `ON DELETE RESTRICT` szabályt használ, a rendelésekhez és
-kapcsolótáblákhoz több helyen `ON DELETE CASCADE` tartozik. Az adatbázisban 13
-nézet és 17 névvel ellátott index található. Ezek részei a használt adatbázisnak,
-de az alkalmazás nem hozza létre és nem módosítja őket.
+- Rendelést csak aktív felhasználó adhat le, aktív termékekből, legalább egy
+  tétellel. Az új rendelés `új` státuszú, futár nélkül; a cím és a számlázási adat
+  alapból a felhasználóé.
+- A tételeket csak `új` státuszban lehet módosítani; ugyanaz a termék újra
+  hozzáadva a darabszámot növeli; az utolsó tétel nem törölhető (helyette le kell
+  mondani a rendelést). Lemondani is csak `új` rendelést lehet.
+- Futár csak aktív, `elerheto`, aktív rendelés nélküli állapotban vehet fel
+  rendelést, és csak a hatósugarán belül. Felvételkor `uton` lesz, kiszállítás után
+  újra `elerheto`. Kézzel csak `elerheto` és `szunet` között vált, aktív rendelés
+  nélkül.
+- Értékelni (1–5) és jattot adni csak kiszállított rendelésnél lehet, egyszer;
+  jattot csak kártyás fizetésnél. Ezeket csak a megrendelő teheti meg.
+- Pozíciót csak úton lévő futár rögzíthet; a futár egyetlen pozíció-sora
+  felülíródik.
 
 ### HTTP API – `api.py`
 
-Az alkalmazás neve `Futárszolgálat API`. A jelenlegi útvonalak:
+A felhasználói és futár-műveleteknél a kérés törzsében a műveletet végző
+felhasználó (`felhasznalo_id`) vagy futár (`futar_id`) azonosítója szerepel; a
+bejelentkeztetést és a munkamenetet a hívó (a Laravel backend) kezeli.
 
 | Metódus | Útvonal | Művelet |
 | --- | --- | --- |
-| `POST` | `/bejelentkezes` | E-mail és jelszó ellenőrzése; siker esetén a publikus felhasználói adatokat adja vissza. Munkamenetet vagy tokent nem hoz létre. |
-| `POST` | `/felhasznalo` | Felhasználó regisztrálása. |
-| `GET` | `/felhasznalo` | Felhasználók keresése és lapozása. |
+| `POST` | `/bejelentkezes` | E-mail és jelszó ellenőrzése (csak aktív felhasználó); a publikus felhasználói adatokat adja vissza. |
+| `POST` | `/felhasznalo` | Felhasználó regisztrálása; a létrehozott felhasználót adja vissza. |
+| `GET` | `/felhasznalo` | Felhasználók keresése és lapozása (`aktiv`, `admin` szűrővel is). |
 | `GET` | `/felhasznalo/{felhasznalo_id}` | Felhasználó lekérdezése azonosító alapján. |
 | `GET` | `/felhasznalo/email/{email}` | Felhasználó lekérdezése e-mail-cím alapján. |
-| `PUT` | `/felhasznalo/{felhasznalo_id}` | Felhasználói adatok cseréje/módosítása. |
-| `DELETE` | `/felhasznalo/{felhasznalo_id}` | Felhasználó törlése; az adatbázis a kapcsolódó rendeléseket is törölheti. |
-| `GET` | `/felhasznalo/{felhasznalo_id}/rendelesek` | A felhasználó rendelései. |
+| `PUT` | `/felhasznalo/{felhasznalo_id}` | Adatok módosítása; `jelszo` nélkül a jelszó nem változik; `aktiv` is állítható. |
+| `DELETE` | `/felhasznalo/{felhasznalo_id}` | Inaktiválás (nem törlés); a rendelések megmaradnak. |
+| `GET` | `/felhasznalo/{felhasznalo_id}/rendelesek` | A felhasználó rendelései, legújabb elöl. |
+| `POST` | `/futar/bejelentkezes` | Futár azonosítása névvel és telefonszámmal (csak aktív futár). |
 | `POST` | `/futar` | Futár felvétele. |
 | `GET` | `/futar` | Futárok keresése és lapozása. |
-| `GET` | `/futar/elerheto` | Elérhető futárok listázása, opcionális járműszűrővel. |
-| `GET` | `/futar/allapotok` | A három adatbázis által elfogadott futárállapot és megnevezése. |
+| `GET` | `/futar/elerheto` | Aktív, elérhető, aktív rendelés nélküli futárok. |
+| `GET` | `/futar/allapotok` | A három futárállapot és megnevezése. |
 | `GET` | `/futar/szallitasra-alkalmas?km=5` | Elérhető futárok, akiknek a hatósugara legalább a megadott távolság. |
+| `POST` | `/futar/pozicio` | Az úton lévő futár aktuális pozíciójának rögzítése (felülírja az előzőt). |
 | `GET` | `/futar/{futar_id}` | Futár lekérdezése. |
-| `PATCH` | `/futar/{futar_id}/allapot` | Futár állapotának módosítása. |
-| `GET` | `/futar/{futar_id}/rendelesek` | A futár rendelései. |
-| `POST` | `/futar/pozicio` | Futárpozíció rögzítése. |
-| `GET` | `/futar/{futar_id}/poziciok` | Futárpozíciók lekérdezése, legújabb elöl. |
-| `GET` | `/allergen` | Allergének listázása. |
+| `PUT` | `/futar/{futar_id}` | Futár adatainak módosítása (`aktiv` is). |
+| `DELETE` | `/futar/{futar_id}` | Inaktiválás (nem törlés); aktív rendeléssel `409`. |
+| `PATCH` | `/futar/{futar_id}/allapot` | Kézi állapotváltás: `elerheto` ↔ `szunet`. |
+| `GET` | `/futar/{futar_id}/pozicio` | A futár aktuális pozíciója (vagy `null`). |
+| `GET` | `/futar/{futar_id}/rendelesek` | A futár rendelései, legújabb elöl. |
+| `GET` | `/futar/{futar_id}/felveheto-rendelesek` | Felvehető új rendelések a hatósugarán belül, a prioritásosak elöl. |
+| `GET` | `/fogas` | Fogások és típusuk. |
+| `GET`, `POST` | `/allergen` | Allergének listázása, felvétele (név egyedi, kis-/nagybetűtől függetlenül). |
+| `PUT`, `DELETE` | `/allergen/{kod}` | Allergén átnevezése, törlése (használatban lévőnél `409`). |
 | `POST` | `/termek` | Termék felvétele allergénkódokkal. |
-| `GET` | `/termek` | Termékek keresése/szűrése és lapozása, allergénekkel. |
+| `GET` | `/termek` | Termékek keresése/szűrése és lapozása (`aktiv` szűrővel is), allergénekkel. |
 | `GET` | `/termek/{termek_id}` | Termék lekérdezése. |
-| `POST` | `/rendeles` | Rendelés létrehozása a termékazonosítókból és darabszámokból. |
-| `GET` | `/rendeles` | Rendelések keresése/szűrése és lapozása. |
-| `GET` | `/rendeles/{rendeles_id}` | Rendelés lekérdezése a tételeivel. |
-| `GET` | `/rendeles/{rendeles_id}/allergenek` | Az adott rendelés termékeiben előforduló allergének egyedi listája. |
-| `PATCH` | `/rendeles/{rendeles_id}/statusz` | Rendelés státuszának módosítása; `lemondva` csak a lemondási művelettel állítható be. |
-| `POST` | `/rendeles/{rendeles_id}/lemondas` | Lemondja a rendelést, ha a státusza `új` vagy `elfogadva`. |
+| `PUT` | `/termek/{termek_id}` | Termék módosítása, az allergénlistát is lecseréli; inaktiválás: `aktiv: false`. |
+| `DELETE` | `/termek/{termek_id}` | Törlés, ha még nem rendelték; különben `409`. |
+| `POST` | `/rendeles` | Rendelés leadása (`új`, futár nélkül), tételekkel és opcionális számlázási adattal. |
+| `GET` | `/rendeles` | Rendelések keresése/szűrése és lapozása (`letrehozva_tol`, `letrehozva_ig` is). |
+| `GET` | `/rendeles/statuszok` | A lehetséges rendelési státuszok. |
+| `GET` | `/rendeles/{rendeles_id}` | Rendelés a tételeivel, egységárakkal, számlázási adattal, összegekkel. |
+| `GET` | `/rendeles/{rendeles_id}/allergenek` | A rendelés termékeiben előforduló allergének egyedi listája. |
+| `POST` | `/rendeles/{rendeles_id}/tetelek` | Tétel hozzáadása (megrendelő, `új` státuszban). |
+| `PATCH`, `DELETE` | `/rendeles/{rendeles_id}/tetelek/{termek_id}` | Darabszám módosítása, tétel törlése (`DELETE`-nél `?felhasznalo_id=`). |
+| `POST` | `/rendeles/{rendeles_id}/lemondas` | Lemondás (megrendelő, `új` státuszban). |
+| `POST` | `/rendeles/{rendeles_id}/felvetel` | A futár felveszi: `új` → `elfogadva`. |
+| `POST` | `/rendeles/{rendeles_id}/keszul` | A konyha készíti: `elfogadva` → `készül`. |
+| `POST` | `/rendeles/{rendeles_id}/atvetel` | A futár átveszi: `elfogadva`/`készül` → `úton`. |
+| `POST` | `/rendeles/{rendeles_id}/kiszallitas` | A futár átadja: `úton` → `kiszállítva`. |
+| `POST` | `/rendeles/{rendeles_id}/ertekeles` | Értékelés 1–5 (megrendelő, kiszállítás után, egyszer). |
+| `POST` | `/rendeles/{rendeles_id}/jatt` | Jatt (megrendelő, kiszállítás után, kártyás fizetésnél, egyszer). |
 
-A felhasználó-válasz külön összeállított mezőlistát használ, ezért a
-jelszó nem kerül bele. A nem található rekordoknál az API `404` választ,
-az üzleti validációs hibáknál jellemzően `400`, az adatbázis egyedi vagy CHECK
-korlátozásainak ütközésekor `409` választ ad. A lemondási végpont `404`-et ad,
-ha a rendelés nem létezik, és `409`-et, ha a rendelés már nem `új` vagy
-`elfogadva` státuszú. A státuszellenőrzés és a lemondás egyetlen feltételes
-SQL-módosításban történik; a státusz-végpont és az új rendelés létrehozása
-nem használható ennek megkerülésére. A FastAPI
-automatikus interaktív dokumentációja a futó alkalmazás `/docs` útvonalán
+Rendelési státuszt általánosan beállító végpont nincs: a státusz csak a fenti
+folyamatlépésekkel változhat. A válaszkódok: `400` érvénytelen adat, `401` hibás
+bejelentkezés vagy API-token, `403` nem a saját rendelés, `404` nem található,
+`409` üzleti szabályba vagy adatbázis-korlátozásba ütközik, `422` hiányzó vagy rossz
+típusú mező a kérésben. A FastAPI interaktív dokumentációja a `/docs` útvonalon
 érhető el.
+
+#### API-token
+
+Ha az `API_TOKEN` környezeti változó be van állítva, minden író kérés (`POST`,
+`PUT`, `PATCH`, `DELETE`) csak `Authorization: Bearer <token>` fejléccel megy át,
+különben `401`. Az olvasó végpontok és a dokumentáció nyilvánosak maradnak.
+Renderen a tokent a szolgáltatás környezeti változói között kell megadni, a
+Laravelben ugyanezt a tokent kell beállítani (`PYTHON_API_TOKEN`). Ha nincs
+beállítva, az API védelem nélkül fut, ahogy eddig.
 
 #### Elérés Renderből és PHP-ből
 
 Az API Renderen beállított alapcímét a Render Dashboard szolgáltatásoldalán
 lehet megnézni. Ne rögzítsd a szolgáltatás konkrét URL-jét a repóban; a PHP
-alkalmazás konfigurációjából add meg, például `FUTARSZOLGALAT_API_URL`
-környezeti változóként (a Render URL önmagában publikus cím, nem hozzáférési
-jelszó vagy API-kulcs).
+alkalmazás konfigurációjából add meg környezeti változóként.
 
 - Interaktív API-dokumentáció: `<API-alapcím>/docs`
-- Példa elérhető futárok lekérésére:
-  `GET <API-alapcím>/futar/elerheto`
-- Példa 5 km-re alkalmas futárok lekérésére:
-  `GET <API-alapcím>/futar/szallitasra-alkalmas?km=5`
+- Példa elérhető futárok lekérésére: `GET <API-alapcím>/futar/elerheto`
+- Példa rendelés felvételére:
+  `POST <API-alapcím>/rendeles/123/felvetel` `{"futar_id": 5}`
 
 A PHP backend teljes URL-re küldött HTTP-kéréssel, JSON-adatcserével hívja az
 API-t; nem kell közvetlenül csatlakoznia a Python alkalmazáshoz vagy az SQLite
-fájlhoz. A PHP GET-kérés például cURL-lel, az alapcímet környezeti
-változóból olvasva:
+fájlhoz. Az API gyökérútvonala (`/`) nem szolgál ki kezdőoldalt, ott a `404 Not
+Found` válasz normális.
 
-```php
-$apiBase = rtrim(getenv('FUTARSZOLGALAT_API_URL'), '/');
-$ch = curl_init($apiBase . '/futar/elerheto');
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-$json = curl_exec($ch);
-if ($json === false) {
-    throw new RuntimeException(curl_error($ch));
-}
-$status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-curl_close($ch);
+## Indítás, tesztek és telepítés
 
-if ($status < 200 || $status >= 300) {
-    throw new RuntimeException("A futár API HTTP $status hibát adott.");
-}
-$futarok = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
-```
-
-Az API gyökérútvonala (`/`) nem szolgál ki kezdőoldalt, ezért ott a `404 Not
-Found` válasz normális; az API-dokumentáció és a végpontok ettől még a saját
-útvonalaikon érhetők el. A PHP-szerverről indított HTTP-kéréshez a PHP cURL
-kiterjesztésének engedélyezve kell lennie.
-
-Az `adatbazis.py` minden alkalmazási szintű adatfüggvényéhez tartozik
-HTTP-végpont: létrehozás, lekérdezés, módosítás/törlés, bejelentkezés és a
-négy szűrőfüggvény is elérhető. A futárállapotok értékei az adatbázis CHECK
-megszorítását követik: `elerheto`, `uton`, `szunet`; az állapotmódosító
-végpont csak ezeket fogadja el. A szállításra alkalmas futárok lekérdezése az
-`elerheto` állapotot és a `hatosugar_km >= km` feltételt alkalmazza. A
-rendelési allergénlista a termékek allergénneveit egyedileg, rendezve adja
-vissza. A kapcsolatkezelő és a belső, aláhúzással kezdődő segédfüggvények nem
-külön végpontok. Az API listavégpontjai
-alapértelmezésben 100 rekordot adnak, legfeljebb 1000-es lapmérettel.
-
-### Az ERD üzleti folyamatai
-
-Az `erd.drawio.png` az elvárt weboldali logikát vázolja fel:
-
-- felhasználói regisztráció, bejelentkezés, profil és rendelési előzmények;
-- étel/ital kínálat fogás, ár, prioritás és allergén szerinti böngészése;
-- kosár tételeinek kezelése, majd a kosár rendelésként való leadása;
-- rendelési cím, távolság, díjazás, fizetés/számlázás és rendelési státusz;
-- futárállapotok és GPS-pozíciók, futárhoz rendelés, kiszállítás követése;
-- adminisztrátori termék-, allergén-, futár- és rendeléskezelés, valamint
-  kimutatások.
-
-Az API az adatbázisban ténylegesen rendelkezésre álló függvényeket teszi
-hívhatóvá. Az ERD néhány folyamata további, jelenleg nem létező üzleti logikát
-igényel: nincs külön kosár/ideiglenes rendelés-életciklus, térképes
-legközelebbi-futár vagy távolság-/díjszámítás, online fizetési szolgáltató,
-számlakibocsátás, rendelés elfogadási/visszautasítási folyamat, illetve
-riportfüggvény az adatbázisrétegben. Ezeket a meglévő CRUD- és szűrőfüggvények
-önmagukban nem valósítják meg. A dump megszorítása miatt a jelenlegi
-rendeléslétrehozás kártyás fizetést követel meg.
-
-## Indítás és telepítés
-
-Python 3.10 vagy újabb szükséges a kódban használt típusannotációkhoz.
-Windows PowerShellben virtuális környezetből például így indítható:
+Python 3.10 vagy újabb szükséges. Windows PowerShellben virtuális környezetből
+például így indítható:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 uvicorn api:app --reload
 ```
 
-Ezután az API alapértelmezés szerint a `http://127.0.0.1:8000` címen érhető
-el, a dokumentáció pedig a `http://127.0.0.1:8000/docs` címen. A Render
-konfiguráció ugyanezt az `api:app` ASGI-alkalmazást indítja, a szolgáltatás
-által megadott porton.
+macOS-en és Linuxon ugyanez: `python3 -m venv .venv`, `source .venv/bin/activate`.
+Ezután az API a `http://127.0.0.1:8000` címen érhető el, a dokumentáció a
+`http://127.0.0.1:8000/docs` címen.
+
+Tesztek futtatása (az adatbázis másolatán, a repó fájlja nem változik):
+
+```powershell
+python -m pytest
+```
+
+A Render konfiguráció ugyanezt az `api:app` ASGI-alkalmazást indítja, a
+szolgáltatás által megadott porton.
 
 ## Fontos határok és megjegyzések
 
-- A dump `felhasznalo` táblájában az e-mail és a jelszó kötelező. A jelszavak
-  sima szövegként tárolódnak, ez a dump formátumának következménye, és nem
-  biztonságos megoldás.
-- Az adatbázisréteg több műveletet biztosít, mint amennyit a HTTP API
-  üzleti folyamatként lefed: az adatbázisfüggvények mind elérhetők, de az ERD
-  külső fizetési, kosár-, távolságszámítási és riportfolyamatai nem részei a
-  jelenlegi adatkezelőnek.
-- Az API-rendeléskérés kötelező, 1–5 közötti `ertekeles` mezőt kér, és a
-  `rendeles_letrehoz()` is elutasítja a `None` értéket. Az adatbázis oszlopa
-  nullable, de a nem-NULL értékeket ugyanilyen tartományra korlátozza.
-- Jelszómódosítási funkció nincs, az ERD folyamatainak megfelelően a modellből
-  is kikerült.
-- A SQLite-adatbázis fájl útvonala az alkalmazáskód mellett van rögzítve; a
-  repó nem állít be külön, környezeti változóból vezérelt adatbázis-helyet.
-- Az alkalmazás adatokat olvas és módosít, de a tábla-, index- és nézetstruktúrát
-  változatlanul hagyja. Az adatbázisfájl törlése vagy hiánya esetén nem
-  inicializál helyette üres adatbázist.
-- A dump `rendeles` táblájának `jatt` CHECK feltétele készpénzes rendelést nem
-  enged menteni; ezt a modell már adatbázis-művelet előtt validálja.
-- Jelenleg nincs API-kulcs, felhasználói munkamenet vagy szerepkör-alapú
-  jogosultság-ellenőrzés. A végpontok a kérésnek megfelelően védelem nélkül
-  érhetők el; internetes Render-telepítés előtt ezt külön rendezni kell.
-
-## Adatbázis-betöltés és ellenőrzés
-
-Az `etelrendelesvegleges.db.sql` dump állítja vissza a repó
-`futarszolgalat.db` adatbázisát. Az eredeti dump 14 allergént, 4 felhasználót,
-1000 futárt, 1000 futárpozíciót, 1000 terméket, 1360 termék-allergén
-kapcsolatot, 1000 rendelést és 1000 rendelési tételt tartalmazott. A drónos
-kiszállítások kivezetésekor 89 drónos futárt, 89 hozzájuk tartozó pozíciót,
-valamint 86 rendelést és a hozzájuk tartozó rendelési tételeket töröltük. A
-jelenlegi adatbázisban 911 futár, 911 futárpozíció, 914 rendelés és 914
-rendelési tétel maradt; az adatbázis szerkezete nem változott, a megmaradt
-futárok `ember` értékeit nem módosítottuk. A drónos rekordok törlése kizárólag
-az adatokat érintette: a dump eredeti táblái, nézetei, indexei és
-séma-megszorításai változatlanok maradtak. Az alkalmazásban nincs
-séma-inicializáló SQL-fájl.
+- A Render ingyenes csomagjában a fájlrendszer nem tartós: újraindításkor vagy új
+  telepítéskor az API-n keresztül beírt adatok elvesznek, és a repóban lévő
+  `futarszolgalat.db` áll vissza. Tartós működéshez tartós tárhely kell (a
+  `FUTARSZOLGALAT_DB` változóval oda lehet irányítani az adatbázist).
+- Az API maga nem kezel munkamenetet és szerepköröket: hogy ki adminisztrátor, és
+  hogy a kérésben szereplő `felhasznalo_id`/`futar_id` tényleg a bejelentkezett
+  felhasználóé-e, azt a hívó (Laravel) ellenőrzi. Ezért kell élesben az
+  `API_TOKEN`, hogy csak a Laravel tudjon írni.
+- A `kosar` státuszt az adatbázis engedi, de az API nem hoz létre kosár-rendelést:
+  a kosarat a hívó kezeli, és egyben adja le a rendelést.
+- A `szallitasi_dij` mindig 0 (az adatbázis alapértéke): a díjszámítás szabálya még
+  nincs meghatározva.
+- A futárpozíciókat egy másik csapat MongoDB-ben is kezeli; hogy az SQLite
+  `futar_pozicio` tábla hosszú távon megmarad-e, még nincs eldöntve.
